@@ -1,19 +1,18 @@
-import JSZip from "jszip";
-import type {LifeTimeCircleHook, LogWrapper} from "../../../dist-BeforeSC2/ModLoadController";
+import type {LogWrapper} from "../../../dist-BeforeSC2/ModLoadController";
 import type {AddonPluginHookPointEx} from "../../../dist-BeforeSC2/AddonPlugin";
 import type {SC2DataManager} from "../../../dist-BeforeSC2/SC2DataManager";
 import type {ModUtils} from "../../../dist-BeforeSC2/Utils";
 import type {
+    JSZipLikeReadOnlyInterface,
+    JSZipObjectLikeReadOnlyInterface,
+} from "../../../dist-BeforeSC2/JSZipLikeReadOnlyInterface";
+import type {
     IModImgGetter,
-    IModImgGetterLRUCache,
-    ImgLruCacheItemType,
     ModBootJson,
-    ModImg,
     ModInfo,
 } from "../../../dist-BeforeSC2/ModLoader";
 import type {ModZipReader} from "../../../dist-BeforeSC2/ModZipReader";
-import {clone, every, isArray, isNil, isString} from 'lodash';
-import {LRUCache} from 'lru-cache';
+import {every, isArray, isNil, isString} from 'lodash';
 import {extname} from "./extname";
 import JSON5 from 'json5';
 import {
@@ -25,38 +24,14 @@ import {
     TypeOrderItem,
 } from "./BeautySelectorAddonType";
 import {BeautySelectorAddonInterface} from "./BeautySelectorAddonInterface";
-import {isZipFileObj, traverseZipFolder, ZipFile, isImageFile} from "./utils/traverseZipFolder";
-import {getRelativePath} from "./utils/getRelativePath";
+import {traverseZipFolder, isImageFile} from "./utils/traverseZipFolder";
 import type {
     ModSubUiAngularJsModeExportInterface
 } from "../../ModSubUiAngularJs/dist-ts/ModSubUiAngularJsModeExportInterface";
 import {StringTable} from "./GUI_StringTable/StringTable";
-import {openDB as idb_openDB, deleteDB as idb_deleteDB, IDBPDatabase, IDBPTransaction, StoreNames, DBSchema} from 'idb';
-import {IndexNames} from "idb/build/entry";
 import {CachedFileList, ModImageStore} from "./ModImageStore";
-
-// https://github.com/bryc/code/blob/master/jshash/experimental/cyrb53.js
-// https://stackoverflow.com/questions/7616461/generate-a-hash-from-string-in-javascript
-
-/*
-    cyrb53 (c) 2018 bryc (github.com/bryc)
-    License: Public domain. Attribution appreciated.
-    A fast and simple 53-bit string hash function with decent collision resistance.
-    Largely inspired by MurmurHash2/3, but with a focus on speed/simplicity.
-*/
-const cyrb53 = function (str: string, seed = 0): number {
-    let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
-    for (let i = 0, ch; i < str.length; i++) {
-        ch = str.charCodeAt(i);
-        h1 = Math.imul(h1 ^ ch, 2654435761);
-        h2 = Math.imul(h2 ^ ch, 1597334677);
-    }
-    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-    h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-    h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-    return 4294967296 * (2097151 & h2) + (h1 >>> 0);
-};
+import {CssReplacer} from "./CssReplacer";
+import {NodeMutationObserver} from "./NodeMutationObserver";
 
 export function imgWrapBase64Url(fileName: string, base64: string) {
     let ext = extname(fileName);
@@ -71,6 +46,7 @@ export class BeautySelectorAddonImgGetterIndexedDB implements IModImgGetter {
     constructor(
         public modName: string,
         public modHashString: string,
+        public type: string,
         public imgPath: string,
         public imageStore: ModImageStore,
         public logger: LogWrapper,
@@ -91,7 +67,7 @@ export class BeautySelectorAddonImgGetterIndexedDB implements IModImgGetter {
         }
 
         try {
-            const imageData = await this.imageStore.getImage(this.modName, this.modHashString, this.imgPath);
+            const imageData = await this.imageStore.getImage(this.modName, this.modHashString, this.type, this.imgPath);
             if (imageData) {
                 return imageData;
             } else {
@@ -182,6 +158,8 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             'BeautySelectorAddon',
             {
                 ModLoaderLoadEnd: async () => {
+                    this.nodeMutationObserver.start();
+                    await this.replaceStyleSheets();
                     await this.onModLoaderLoadEnd();
                 },
             }
@@ -189,6 +167,8 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         this.IdbKeyValRef = this.gModUtils.getIdbKeyValRef();
         this.cachedFileList = new CachedFileList(this.gModUtils, this.logger);
         this.imageStore = new ModImageStore(this.gModUtils, this.logger);
+        this.cssReplacer = new CssReplacer(window, gSC2DataManager, gModUtils);
+        this.nodeMutationObserver = new NodeMutationObserver(this.imageGetter.bind(this), gModUtils);
 
         const theName = this.gModUtils.getNowRunningModName();
         if (!theName) {
@@ -212,7 +192,39 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
 
     protected cachedFileList: CachedFileList;
     protected imageStore: ModImageStore;
+    protected cssReplacer: CssReplacer;
+    protected nodeMutationObserver: NodeMutationObserver;
     protected typeOrderSubUi?: TypeOrderSubUi;
+    protected imageStoreYieldCount = 0;
+
+    protected async waitImageStoreTurn() {
+        this.imageStoreYieldCount++;
+        if ((this.imageStoreYieldCount % 16) === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+    }
+
+    protected getImageMimeType(imagePath: string) {
+        const ext = imagePath.split('.').pop()?.toLowerCase();
+        if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+        if (ext === 'gif') return 'image/gif';
+        if (ext === 'webp') return 'image/webp';
+        if (ext === 'svg') return 'image/svg+xml';
+        if (ext === 'bmp') return 'image/bmp';
+        return 'image/png';
+    }
+
+    protected async storeZipImageToIndexDB(
+        streaming: Awaited<ReturnType<ModImageStore['initStreamingStorage']>>,
+        imagePath: string,
+        realPath: string,
+        imageFile: JSZipObjectLikeReadOnlyInterface,
+    ) {
+        const base64Data = await imageFile.async('base64');
+        const imageData = `data:${this.getImageMimeType(realPath)};base64,${base64Data}`;
+        await streaming.storeImage(imagePath, realPath, imageData);
+        await this.waitImageStoreTurn();
+    }
 
     async onModLoaderLoadEnd() {
 
@@ -256,8 +268,27 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
 
     type0ModNameList: string[] = [];
 
+    async canLoadThisMod(bootJson: ModBootJson, _zip: JSZipLikeReadOnlyInterface): Promise<boolean> {
+        const oldImageLoaderAddonList = bootJson.addonPlugin?.filter(T => this.isImageLoaderAddonModName(T.modName));
+        if (oldImageLoaderAddonList?.length) {
+            bootJson.addonPlugin = bootJson.addonPlugin?.filter(T => !this.isImageLoaderAddonModName(T.modName)) || [];
+            if (!bootJson.addonPlugin.find(T => T.modName === 'BeautySelectorAddon' && T.addonName === 'BeautySelectorAddon')) {
+                bootJson.addonPlugin.push({
+                    modName: 'BeautySelectorAddon',
+                    addonName: 'BeautySelectorAddon',
+                    modVersion: '^2.9.0',
+                    params: oldImageLoaderAddonList[0].params || {},
+                });
+            }
+        }
+        if (bootJson.dependenceInfo?.length) {
+            bootJson.dependenceInfo = bootJson.dependenceInfo.filter(T => !this.isImageLoaderAddonModName(T.modName));
+        }
+        return true;
+    }
+
     async registerMod(addonName: string, mod: ModInfo, modZip: ModZipReader) {
-        const ad = mod.bootJson.addonPlugin?.find(T => T.modName === 'BeautySelectorAddon' && T.addonName === 'BeautySelectorAddon');
+        let ad = mod.bootJson.addonPlugin?.find(T => T.modName === 'BeautySelectorAddon' && T.addonName === 'BeautySelectorAddon');
         if (!ad) {
             console.error(`[BeautySelectorAddon] registerMod: cannot find addonPlugin in bootJson`, [addonName, mod.name, mod, modZip]);
             this.logger.error(`[BeautySelectorAddon] registerMod: cannot find addonPlugin in bootJson [${mod.name}]`);
@@ -337,15 +368,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                             const imageFile = modZip.zip.file(imagePath);
                             if (imageFile) {
                                 try {
-                                    const base64Data = await imageFile.async('base64');
-                                    const ext = imagePath.split('.').pop()?.toLowerCase();
-                                    let mimeType = 'image/png';
-                                    if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-                                    else if (ext === 'gif') mimeType = 'image/gif';
-                                    else if (ext === 'webp') mimeType = 'image/webp';
-
-                                    const imageData = `data:${mimeType};base64,${base64Data}`;
-                                    await streaming.storeImage(imagePath, imagePath, imageData);
+                                    await this.storeZipImageToIndexDB(streaming, imagePath, imagePath, imageFile);
                                 } catch (error) {
                                     console.warn(`[BeautySelectorAddon] Failed to process image: ${imagePath}`, error);
                                 }
@@ -372,7 +395,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                     imgList.set(imagePath, {
                         path: imagePath,
                         realPath: imagePath, // Not needed for IndexedDB version
-                        getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), imagePath, this.imageStore, this.logger),
+                        getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), type, imagePath, this.imageStore, this.logger),
                     });
                 }
             }
@@ -457,15 +480,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                                     const imageFile = modZip.zip.file(realPath);
                                     if (imageFile) {
                                         try {
-                                            const base64Data = await imageFile.async('base64');
-                                            const ext = realPath.split('.').pop()?.toLowerCase();
-                                            let mimeType = 'image/png';
-                                            if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-                                            else if (ext === 'gif') mimeType = 'image/gif';
-                                            else if (ext === 'webp') mimeType = 'image/webp';
-
-                                            const imageData = `data:${mimeType};base64,${base64Data}`;
-                                            await streaming.storeImage(imagePath, realPath, imageData);
+                                            await this.storeZipImageToIndexDB(streaming, imagePath, realPath, imageFile);
                                         } catch (error) {
                                             console.warn(`[BeautySelectorAddon] Failed to process image: ${realPath}`, error);
                                         }
@@ -492,7 +507,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                             imgList.set(imagePath, {
                                 path: imagePath,
                                 realPath: imagePath, // Not needed for IndexedDB version
-                                getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), imagePath, this.imageStore, this.logger),
+                                getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), type, imagePath, this.imageStore, this.logger),
                             });
                         }
                     }
@@ -516,32 +531,20 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
 
                         try {
                             // Process images with streaming approach to minimize memory usage
-                            let previousPercent = 0;
+                            let previousLoggedCount = 0;
                             const fileList = await traverseZipFolder(modZip.zip, L.imgDir, this.logger, {
                                 onImageFound: async (imageInfo) => {
                                     try {
-                                        const base64Data = await imageInfo.file.async('base64');
-                                        const ext = imageInfo.pathInZip.split('.').pop()?.toLowerCase();
-                                        let mimeType = 'image/png';
-                                        if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
-                                        else if (ext === 'gif') mimeType = 'image/gif';
-                                        else if (ext === 'webp') mimeType = 'image/webp';
-
-                                        const imageData = `data:${mimeType};base64,${base64Data}`;
-                                        await streaming.storeImage(imageInfo.pathInSpecialFolder!, imageInfo.pathInZip, imageData);
+                                        await this.storeZipImageToIndexDB(streaming, imageInfo.pathInSpecialFolder!, imageInfo.pathInZip, imageInfo.file);
                                     } catch (error) {
                                         console.warn(`[BeautySelectorAddon] Failed to process image: ${imageInfo.pathInZip}`, error);
                                     }
                                 },
-                                progressCallback: async (processedCount, totalCount) => {
-                                    // console.log(`[BeautySelectorAddon] traverseZipFolder progress`, [modName, modHash, type, processedCount, totalCount]);
-                                    const floorValue = Math.floor((processedCount / totalCount) * 100);
-                                    if (previousPercent !== floorValue) {
-                                        previousPercent = floorValue;
-                                        if ((previousPercent % 10) === 0) {
-                                            this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... ` + floorValue);
-                                            console.log(`[BeautySelectorAddon] Cache file to IndexDB ` + floorValue, [modName, modHash, type]);
-                                        }
+                                progressCallback: async (processedCount, _totalCount) => {
+                                    if ((processedCount - previousLoggedCount) >= 100) {
+                                        previousLoggedCount = processedCount;
+                                        this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... ${processedCount}`);
+                                        console.log(`[BeautySelectorAddon] Cache file to IndexDB ${processedCount}`, [modName, modHash, type]);
                                     }
                                 },
                             });
@@ -570,7 +573,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                             imgList.set(imagePath, {
                                 path: imagePath,
                                 realPath: imagePath, // Not needed for IndexedDB version
-                                getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), imagePath, this.imageStore, this.logger),
+                                getter: new BeautySelectorAddonImgGetterIndexedDB(modName, modHash.toString(), type, imagePath, this.imageStore, this.logger),
                             });
                         }
                     }
@@ -637,6 +640,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     async imageGetter(
         src: string,
     ) {
+        src = this.normalizePath(src);
 
         if (!this.typeOrderUsed) {
             if (this.errorCount < 10) {
@@ -674,7 +678,24 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         return undefined;
     }
 
+    protected isImageLoaderAddonModName(modName: string) {
+        return modName === 'ImageLoaderHook'
+            || modName === 'ImageLoaderHookCore'
+            || modName === 'ModLoader DoL ImageLoaderHook'
+            || modName === 'ImageLoaderHook2BeautySelectorAddon';
+    }
+
+    async replaceStyleSheets() {
+        await this.cssReplacer.replaceStyleSheets();
+    }
+
+    async replaceAllImageInHtmlElement(content: HTMLElement) {
+        const imgList = Array.from(content.querySelectorAll('img'));
+        await Promise.all(imgList.map(async (img) => this.nodeMutationObserver.processNodeTag(img, 'src')));
+    }
+
     checkImageExist(src: string) {
+        src = this.normalizePath(src);
 
         if (!this.typeOrderUsed) {
             if (this.errorCount < 10) {
@@ -718,21 +739,38 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
 
 
     init() {
-        if (window.modImgLoaderHooker) {
-            // this hook only will be call if other mod not direct use the `ImageLoaderHookAddon`
-            // this hook will be call if `ImageLoaderHook` cannot find the image in it cache
-            window.modImgLoaderHooker.addSideHooker({
-                hookName: 'BeautySelectorAddonImageSideHook',
-                // those 2 function must have same result
-                imageLoader: this.imageLoader.bind(this),
-                imageGetter: this.imageGetter.bind(this),
-                checkImageExist: this.checkImageExist.bind(this),
-            });
-        } else {
-            console.error('[BeautySelectorAddon] window.modImgLoaderHooker not found');
-            this.logger.error('[BeautySelectorAddon] window.modImgLoaderHooker not found');
-            return;
+        this.gSC2DataManager.getHtmlTagSrcHook().addCheckExistHook('BeautySelectorAddon', (mlSrc: string) => {
+            return this.checkImageExist(mlSrc);
+        });
+        this.gSC2DataManager.getHtmlTagSrcHook().addHook('BeautySelectorAddon', async (el: HTMLImageElement | HTMLElement, mlSrc: string, field: string) => {
+            const img = await this.imageGetter(mlSrc);
+            if (img) {
+                el.setAttribute(field, img);
+                return true;
+            }
+            return false;
+        });
+        this.gSC2DataManager.getHtmlTagSrcHook().addReturnModeHook('BeautySelectorAddonReturnModeHooker', async (mlSrc: string) => {
+            const img = await this.imageGetter(mlSrc);
+            return [!!img, img || mlSrc];
+        });
+
+    }
+
+    normalizePath(path: string): string {
+        if (!path) return path;
+        const segments = path.split('/').filter(segment => segment && segment !== '.');
+        const normalized: string[] = [];
+
+        for (const segment of segments) {
+            if (segment === '..') {
+                normalized.pop();
+            } else {
+                normalized.push(segment);
+            }
         }
+
+        return normalized.join('/');
     }
 
     async iniCustomStore() {
@@ -829,19 +867,19 @@ export class TypeOrderSubUi {
                     };
                 }),
                 onChange: async (
-                    action: any,
+                    _action: any,
                     listEnabled: {
                         key: string | number,
                         str: string,
                         selected: boolean,
                     }[],
-                    listDisabled: {
+                    _listDisabled: {
                         key: string | number,
                         str: string,
                         selected: boolean,
                     }[],
-                    selectedKeyEnabled: string | number,
-                    selectedKeyDisabled: string | number,
+                    _selectedKeyEnabled: string | number,
+                    _selectedKeyDisabled: string | number,
                 ) => {
                     try {
                         // console.log('onChange', [action, listEnabled, listDisabled, selectedKeyEnabled, selectedKeyDisabled]);

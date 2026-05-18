@@ -35,10 +35,6 @@
       "version": "^2.33.0"
     },
     {
-      "modName": "ImageLoaderHook",
-      "version": "^2.22.0"
-    },
-    {
       "modName": "ModLoaderGui",
       "version": "^1.6.0"
     },

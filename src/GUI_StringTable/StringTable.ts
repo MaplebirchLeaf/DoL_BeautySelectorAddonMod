@@ -32,7 +32,7 @@ export function getStringTable(): StringTableType {
 }
 
 export const StringTable: StringTableType = new Proxy({}, {
-    get: function (obj, prop: keyof StringTableType) {
+    get: function (_obj, prop: keyof StringTableType) {
         const s = getStringTable();
         return s[prop];
     },

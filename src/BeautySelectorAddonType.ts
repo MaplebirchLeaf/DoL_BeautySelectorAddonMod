@@ -1,4 +1,4 @@
-import {TypeOrderItemInterface} from "BeautySelectorAddonInterface";
+import {TypeOrderItemInterface} from "./BeautySelectorAddonInterface";
 import type {ModImg, ModInfo} from "../../../dist-BeforeSC2/ModLoader";
 import type {ModZipReader} from "../../../dist-BeforeSC2/ModZipReader";
 

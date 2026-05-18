@@ -1,9 +1,8 @@
 import type {LogWrapper} from "../../../dist-BeforeSC2/ModLoadController";
 import type {ModUtils} from "../../../dist-BeforeSC2/Utils";
-import {clone, every, isArray, isNil, isString} from 'lodash';
-import JSON5 from 'json5';
+import {every, isArray} from 'lodash';
 import {isZipFileObj, ZipFile} from "./utils/traverseZipFolder";
-import {openDB as idb_openDB, deleteDB as idb_deleteDB, IDBPDatabase, IDBPTransaction, StoreNames, DBSchema} from 'idb';
+import {openDB as idb_openDB, IDBPDatabase, IDBPTransaction, StoreNames, DBSchema} from 'idb';
 
 export interface CachedFileListDbSchema extends DBSchema {
     cachedFileList: {
@@ -20,6 +19,7 @@ export interface CachedFileListDbSchema extends DBSchema {
             'by-modName': string,
             'by-modHashString': string,
             'by-type': string,
+            'by-imagePath': string,
             'by-modName-modHashString': [string, string],
             'by-modName-type': [string, string],
             'by-modName-modHashString-type': [string, string, string],
@@ -36,7 +36,7 @@ export interface ModImageStoreDbSchema extends DBSchema {
             imagePath: string,
             realPath: string,
             imageData: string,
-            imageKey: string, // `${modName}_${modHashString}_${imagePath}`
+            imageKey: string, // `${modName}_${modHashString}_${type}_${imagePath}`
         },
         key: string,
         indexes: {
@@ -69,6 +69,8 @@ export interface ModImageStoreDbSchema extends DBSchema {
     },
 }
 
+type ImageStoreRecord = ModImageStoreDbSchema['imageStore']['value'];
+
 export class CachedFileList {
 
     constructor(
@@ -95,7 +97,7 @@ export class CachedFileList {
                 this.BeautySelectorAddon_dbNameCacheFileList,
                 1,
                 {
-                    upgrade: (database: IDBPDatabase<CachedFileListDbSchema>, oldVersion: number, newVersion: number | null, transaction: IDBPTransaction<CachedFileListDbSchema, StoreNames<CachedFileListDbSchema>[], "versionchange">, event: IDBVersionChangeEvent) => {
+                    upgrade: (database: IDBPDatabase<CachedFileListDbSchema>) => {
                         const cachedFileListStorage = database.createObjectStore('cachedFileList', {
                             keyPath: 'hashKey',
                         });
@@ -121,8 +123,6 @@ export class CachedFileList {
             console.error('[BeautySelectorAddon] getCachedFileList error', [e]);
             throw e;
         }
-        const hashKey = `${modName}_${modHashString}_${type}`;
-
         // const store = this.dbRef!.transaction('cachedFileList').objectStore('cachedFileList');
         // await store.index('by-modName-modHashString-type').get([modName, modHashString, type]);
         const r = await this.dbRef!.getFromIndex('cachedFileList', 'by-modName-modHashString-type', [modName, modHashString, type]);
@@ -196,11 +196,11 @@ export class CachedFileList {
         const tans = this.dbRef!.transaction('cachedFileList', 'readwrite');
         try {
             const os = tans.objectStore('cachedFileList');
-            const cc = await os.index('by-modName').getAll(modName);
-            for (const c of cc) {
+            for await (const cursor of os.index('by-modName').iterate(modName)) {
+                const c = cursor.value;
                 if (c.modHashString !== modHashString) {
                     console.log('[BeautySelectorAddon] removeChangedModFileByHash', [c]);
-                    await os.delete(c.hashKey);
+                    await cursor.delete();
                 }
             }
         } finally {
@@ -264,29 +264,36 @@ export class ModImageStore {
                 this.BeautySelectorAddon_dbNameImageStore,
                 1,
                 {
-                    upgrade: (database: IDBPDatabase<ModImageStoreDbSchema>, oldVersion: number, newVersion: number | null, transaction: IDBPTransaction<ModImageStoreDbSchema, StoreNames<ModImageStoreDbSchema>[], "versionchange">, event: IDBVersionChangeEvent) => {
-                        // Create imageStore
-                        const imageStorage = database.createObjectStore('imageStore', {
-                            keyPath: 'imageKey',
-                        });
-                        imageStorage.createIndex('by-modName', 'modName');
-                        imageStorage.createIndex('by-modHashString', 'modHashString');
-                        imageStorage.createIndex('by-type', 'type');
-                        imageStorage.createIndex('by-imagePath', 'imagePath');
-                        imageStorage.createIndex('by-modName-modHashString', ['modName', 'modHashString']);
-                        imageStorage.createIndex('by-modName-type', ['modName', 'type']);
-                        imageStorage.createIndex('by-modName-modHashString-type', ['modName', 'modHashString', 'type']);
+                    upgrade: (database: IDBPDatabase<ModImageStoreDbSchema>, oldVersion: number, _newVersion: number | null, transaction: IDBPTransaction<ModImageStoreDbSchema, StoreNames<ModImageStoreDbSchema>[], "versionchange">) => {
+                        if (!database.objectStoreNames.contains('imageStore')) {
+                            const imageStorage = database.createObjectStore('imageStore', {
+                                keyPath: 'imageKey',
+                            });
+                            imageStorage.createIndex('by-modName', 'modName');
+                            imageStorage.createIndex('by-modHashString', 'modHashString');
+                            imageStorage.createIndex('by-type', 'type');
+                            imageStorage.createIndex('by-imagePath', 'imagePath');
+                            imageStorage.createIndex('by-modName-modHashString', ['modName', 'modHashString']);
+                            imageStorage.createIndex('by-modName-type', ['modName', 'type']);
+                            imageStorage.createIndex('by-modName-modHashString-type', ['modName', 'modHashString', 'type']);
+                        }
 
-                        // Create imageMetadata
-                        const metadataStorage = database.createObjectStore('imageMetadata', {
-                            keyPath: 'metaKey',
-                        });
-                        metadataStorage.createIndex('by-modName', 'modName');
-                        metadataStorage.createIndex('by-modHashString', 'modHashString');
-                        metadataStorage.createIndex('by-type', 'type');
-                        metadataStorage.createIndex('by-modName-modHashString', ['modName', 'modHashString']);
-                        metadataStorage.createIndex('by-modName-type', ['modName', 'type']);
-                        metadataStorage.createIndex('by-modName-modHashString-type', ['modName', 'modHashString', 'type']);
+                        if (!database.objectStoreNames.contains('imageMetadata')) {
+                            const metadataStorage = database.createObjectStore('imageMetadata', {
+                                keyPath: 'metaKey',
+                            });
+                            metadataStorage.createIndex('by-modName', 'modName');
+                            metadataStorage.createIndex('by-modHashString', 'modHashString');
+                            metadataStorage.createIndex('by-type', 'type');
+                            metadataStorage.createIndex('by-modName-modHashString', ['modName', 'modHashString']);
+                            metadataStorage.createIndex('by-modName-type', ['modName', 'type']);
+                            metadataStorage.createIndex('by-modName-modHashString-type', ['modName', 'modHashString', 'type']);
+                        }
+
+                        if (oldVersion > 0 && oldVersion < 2) {
+                            transaction.objectStore('imageStore').clear();
+                            transaction.objectStore('imageMetadata').clear();
+                        }
                     },
                 },
             );
@@ -295,6 +302,18 @@ export class ModImageStore {
     }
 
     BeautySelectorAddon_dbNameImageStore: string = 'BeautySelectorAddon_dbNameImageStore';
+
+    protected ImageStoreBatchSize() {
+        const navigatorInfo = window.navigator as Navigator & { deviceMemory?: number; };
+        const deviceMemory = navigatorInfo.deviceMemory || 4;
+        const hardwareConcurrency = navigatorInfo.hardwareConcurrency || 4;
+        const userAgent = navigatorInfo.userAgent || '';
+        const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent);
+        if (deviceMemory <= 2 || hardwareConcurrency <= 2) return 1;
+        if (deviceMemory <= 4 || hardwareConcurrency <= 4) return isMobile ? 2 : 4;
+        if (deviceMemory >= 8 && hardwareConcurrency >= 8) return isMobile ? 8 : 24;
+        return isMobile ? 4 : 12;
+    }
 
     /**
      * Check if images for a mod are already stored
@@ -335,11 +354,25 @@ export class ModImageStore {
         }
 
         const imagePaths: string[] = [];
+        const pendingRecords: ImageStoreRecord[] = [];
+        const batchSize = this.ImageStoreBatchSize();
 
-        // Use direct put() method which internally creates and commits short transactions
+        const flush = async () => {
+            if (pendingRecords.length === 0) return;
+            const records = pendingRecords.splice(0, pendingRecords.length);
+            const transaction = this.dbRef!.transaction('imageStore', 'readwrite');
+            try {
+                const store = transaction.objectStore('imageStore');
+                for (const imageRecord of records) await store.put(imageRecord);
+            } finally {
+                await transaction.done;
+            }
+            imagePaths.push(...records.map(T => T.imagePath));
+        };
+
         const storeImage = async (imagePath: string, realPath: string, imageData: string) => {
-            const imageKey = `${modName}_${modHashString}_${imagePath}`;
-            const imageRecord = {
+            const imageKey = `${modName}_${modHashString}_${type}_${imagePath}`;
+            const imageRecord: ImageStoreRecord = {
                 modName,
                 modHashString,
                 type,
@@ -349,14 +382,12 @@ export class ModImageStore {
                 imageKey,
             };
 
-            // Direct put() is simpler and handles transactions internally
-            await this.dbRef!.put('imageStore', imageRecord);
-
-            imagePaths.push(imagePath);
+            pendingRecords.push(imageRecord);
+            if (pendingRecords.length >= batchSize) await flush();
         };
 
         const finalize = async () => {
-            // Store metadata using direct put() method
+            await flush();
             const metadataRecord = {
                 modName,
                 modHashString,
@@ -375,7 +406,7 @@ export class ModImageStore {
     /**
      * Get image data by path
      */
-    async getImage(modName: string, modHashString: string, imagePath: string): Promise<string | undefined> {
+    async getImage(modName: string, modHashString: string, type: string, imagePath: string): Promise<string | undefined> {
         try {
             await this.iniImageStore();
         } catch (e) {
@@ -383,7 +414,7 @@ export class ModImageStore {
             throw e;
         }
 
-        const imageKey = `${modName}_${modHashString}_${imagePath}`;
+        const imageKey = `${modName}_${modHashString}_${type}_${imagePath}`;
         const imageRecord = await this.dbRef!.get('imageStore', imageKey);
         return imageRecord?.imageData;
     }
@@ -422,20 +453,20 @@ export class ModImageStore {
             const metadataStore = transaction.objectStore('imageMetadata');
 
             // Remove images with same mod name but different hash
-            const images = await imageStore.index('by-modName').getAll(modName);
-            for (const image of images) {
+            for await (const cursor of imageStore.index('by-modName').iterate(modName)) {
+                const image = cursor.value;
                 if (image.modHashString !== modHashString) {
                     console.log('[BeautySelectorAddon] removeChangedModImages image', [image.imageKey]);
-                    await imageStore.delete(image.imageKey);
+                    await cursor.delete();
                 }
             }
 
             // Remove metadata with same mod name but different hash
-            const metadata = await metadataStore.index('by-modName').getAll(modName);
-            for (const meta of metadata) {
+            for await (const cursor of metadataStore.index('by-modName').iterate(modName)) {
+                const meta = cursor.value;
                 if (meta.modHashString !== modHashString) {
                     console.log('[BeautySelectorAddon] removeChangedModImages metadata', [meta.metaKey]);
-                    await metadataStore.delete(meta.metaKey);
+                    await cursor.delete();
                 }
             }
         } finally {
