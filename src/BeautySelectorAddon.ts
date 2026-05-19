@@ -578,9 +578,8 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                                     }
                                 },
                                 progressCallback: async (processedCount, totalCount) => {
-                                    const percent = totalCount > 0 ? Math.floor((processedCount / totalCount) * 100) : 100;
-                                    this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... [${processedCount}/${totalCount}] ${percent}%`);
-                                    console.log(`[BeautySelectorAddon] Cache file to IndexDB [${processedCount}/${totalCount}] ${percent}%`, [modName, modHash, type]);
+                                    this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... [${processedCount}/${totalCount}]`);
+                                    console.log(`[BeautySelectorAddon] Cache file to IndexDB [${processedCount}/${totalCount}]`, [modName, modHash, type]);
                                 },
                             });
 
