@@ -22,6 +22,7 @@ export function isZipFileObj(A: any): A is ZipFile {
 export interface TraverseOptions {
     getFileRef?: boolean;
     skipFolder?: boolean;
+    progressPercentStep?: number;
     onImageFound?: (imageInfo: {
         pathInZip: string;
         pathInSpecialFolder?: string;
@@ -44,22 +45,37 @@ export async function traverseZipFolder(
     const {
         getFileRef = false,
         skipFolder = false,
+        progressPercentStep = 10,
         onImageFound,
         progressCallback,
     } = options;
 
     const normalizedPath = specialFolderPath.endsWith('/') ? specialFolderPath : specialFolderPath + '/';
+    const entries = Object.entries(zip.files).filter(([pathInZip, file]) => {
+        if (!pathInZip.startsWith(normalizedPath)) return false;
+        if (skipFolder && file.dir) return false;
+        return true;
+    });
+
+    const totalImages = entries.reduce((count, [pathInZip, file]) => {
+        return count + (!file.dir && isImageFile(pathInZip) ? 1 : 0);
+    }, 0);
+
     const result: ZipFile[] = [];
-    let processedFiles = 0;
 
-    for (const [pathInZip, file] of Object.entries(zip.files)) {
-        if (!pathInZip.startsWith(normalizedPath)) {
-            continue;
-        }
-        if (skipFolder && file.dir) {
-            continue;
-        }
+    let processedImages = 0;
+    let nextReportPercent = Math.max(1, progressPercentStep);
 
+    const reportProgress = async (force = false) => {
+        if (!progressCallback || totalImages === 0) return;
+        const currentPercent = Math.floor((processedImages / totalImages) * 100);
+        if (force || currentPercent >= nextReportPercent || processedImages === totalImages ) {
+            await progressCallback(processedImages, totalImages);
+            while (nextReportPercent <= currentPercent) nextReportPercent += Math.max(1, progressPercentStep);
+        }
+    };
+
+    for (const [pathInZip, file] of entries) {
         const isImage = !file.dir && isImageFile(pathInZip);
         const zipFile: ZipFile = {
             pathInZip,
@@ -80,10 +96,9 @@ export async function traverseZipFolder(
                 pathInSpecialFolder: zipFile.pathInSpecialFolder,
                 file,
             });
-            processedFiles++;
-            if (progressCallback) {
-                await progressCallback(processedFiles, processedFiles);
-            }
+
+            processedImages++;
+            await reportProgress(processedImages === totalImages);
         }
 
         result.push(zipFile);

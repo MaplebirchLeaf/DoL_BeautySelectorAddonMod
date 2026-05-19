@@ -4,7 +4,13 @@
     "cn": "美化选择器",
     "en": "Beautiful Selector"
   },
-  "version": "2.9.0",
+  "version": "2.100.0",
+  "alias": [
+    "ImageLoaderHook",
+    "ImageLoaderHookCore",
+    "ModLoader DoL ImageLoaderHook",
+    "ImageLoaderHook2BeautySelectorAddon"
+  ],
   "styleFileList": [
   ],
   "scriptFileList_earlyload": [

@@ -154,13 +154,15 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             'BeautySelectorAddon',
             this,
         );
+        this.ImageLoaderCompatibilityAddonPlugins();
         this.gSC2DataManager.getModLoadController().addLifeTimeCircleHook(
             'BeautySelectorAddon',
             {
+                canLoadThisMod: this.canLoadThisMod.bind(this),
                 ModLoaderLoadEnd: async () => {
+                    await this.onModLoaderLoadEnd();
                     this.nodeMutationObserver.start();
                     await this.replaceStyleSheets();
-                    await this.onModLoaderLoadEnd();
                 },
             }
         );
@@ -197,6 +199,17 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     protected typeOrderSubUi?: TypeOrderSubUi;
     protected imageStoreYieldCount = 0;
 
+    protected ImageLoaderCompatibilityAddonPlugins() {
+        const addonPluginManager = this.gSC2DataManager.getAddonPluginManager();
+        const list: [string, string][] = [
+            ['ImageLoaderHook', 'ImageLoaderAddon'],
+            ['ImageLoaderHookCore', 'ImageLoaderAddon'],
+            ['ModLoader DoL ImageLoaderHook', 'ImageLoaderAddon'],
+            ['ImageLoaderHook2BeautySelectorAddon', 'ImageLoaderHook2BeautySelectorAddon'],
+        ];
+        for (const [modName, addonName] of list) addonPluginManager.registerAddonPlugin(modName, addonName, this);
+    }
+
     protected async waitImageStoreTurn() {
         this.imageStoreYieldCount++;
         if ((this.imageStoreYieldCount % 16) === 0) {
@@ -227,19 +240,13 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     }
 
     async onModLoaderLoadEnd() {
-
-        if (!this.typeOrderUsed) {
-            this.typeOrderUsed = this.typeOrder;
-        }
+        if (!this.typeOrderUsed) this.typeOrderUsed = this.typeOrder;
         await this.loadSavedOrder();
-
         await this.typeOrderSubUi?.init();
-
         await this.cachedFileList.removeNotExistMod(this.registerModNameSet);
         await this.imageStore.removeNotExistModImages(this.registerModNameSet);
         this.cachedFileList.close();
         // this.imageStore.close();
-
         console.log('[BeautySelectorAddon] all ok');
         this.logger.log('[BeautySelectorAddon] all ok');
     }
@@ -269,9 +276,9 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     type0ModNameList: string[] = [];
 
     async canLoadThisMod(bootJson: ModBootJson, _zip: JSZipLikeReadOnlyInterface): Promise<boolean> {
-        const oldImageLoaderAddonList = bootJson.addonPlugin?.filter(T => this.isImageLoaderAddonModName(T.modName));
+        const oldImageLoaderAddonList = bootJson.addonPlugin?.filter(T => this.ImageLoaderAddonModName(T.modName));
         if (oldImageLoaderAddonList?.length) {
-            bootJson.addonPlugin = bootJson.addonPlugin?.filter(T => !this.isImageLoaderAddonModName(T.modName)) || [];
+            bootJson.addonPlugin = bootJson.addonPlugin?.filter(T => !this.ImageLoaderAddonModName(T.modName)) || [];
             if (!bootJson.addonPlugin.find(T => T.modName === 'BeautySelectorAddon' && T.addonName === 'BeautySelectorAddon')) {
                 bootJson.addonPlugin.push({
                     modName: 'BeautySelectorAddon',
@@ -282,13 +289,14 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             }
         }
         if (bootJson.dependenceInfo?.length) {
-            bootJson.dependenceInfo = bootJson.dependenceInfo.filter(T => !this.isImageLoaderAddonModName(T.modName));
+            bootJson.dependenceInfo = bootJson.dependenceInfo.filter(T => !this.ImageLoaderAddonModName(T.modName));
         }
         return true;
     }
 
     async registerMod(addonName: string, mod: ModInfo, modZip: ModZipReader) {
         let ad = mod.bootJson.addonPlugin?.find(T => T.modName === 'BeautySelectorAddon' && T.addonName === 'BeautySelectorAddon');
+        ad ??= mod.bootJson.addonPlugin?.find(T => this.ImageLoaderAddonModName(T.modName));
         if (!ad) {
             console.error(`[BeautySelectorAddon] registerMod: cannot find addonPlugin in bootJson`, [addonName, mod.name, mod, modZip]);
             this.logger.error(`[BeautySelectorAddon] registerMod: cannot find addonPlugin in bootJson [${mod.name}]`);
@@ -531,8 +539,8 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
 
                         try {
                             // Process images with streaming approach to minimize memory usage
-                            let previousLoggedCount = 0;
                             const fileList = await traverseZipFolder(modZip.zip, L.imgDir, this.logger, {
+                                progressPercentStep: 10,
                                 onImageFound: async (imageInfo) => {
                                     try {
                                         await this.storeZipImageToIndexDB(streaming, imageInfo.pathInSpecialFolder!, imageInfo.pathInZip, imageInfo.file);
@@ -540,12 +548,10 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                                         console.warn(`[BeautySelectorAddon] Failed to process image: ${imageInfo.pathInZip}`, error);
                                     }
                                 },
-                                progressCallback: async (processedCount, _totalCount) => {
-                                    if ((processedCount - previousLoggedCount) >= 100) {
-                                        previousLoggedCount = processedCount;
-                                        this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... ${processedCount}`);
-                                        console.log(`[BeautySelectorAddon] Cache file to IndexDB ${processedCount}`, [modName, modHash, type]);
-                                    }
+                                progressCallback: async (processedCount, totalCount) => {
+                                    const percent = totalCount > 0 ? Math.floor((processedCount / totalCount) * 100) : 100;
+                                    this.logger.log(`[BeautySelectorAddon] Cache file to IndexDB [${modName}] ...... [${processedCount}/${totalCount}] ${percent}%`);
+                                    console.log(`[BeautySelectorAddon] Cache file to IndexDB [${processedCount}/${totalCount}] ${percent}%`, [modName, modHash, type]);
                                 },
                             });
 
@@ -643,16 +649,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         src = this.normalizePath(src);
 
         if (!this.typeOrderUsed) {
-            if (this.errorCount < 10) {
-                ++this.errorCount;
-                console.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init?');
-                this.logger.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init?');
-                if (this.errorCount === 10) {
-                    console.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init? this error will not show again');
-                    this.logger.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init? this error will not show again');
-                }
-            }
-            return undefined;
+            this.typeOrderUsed = this.typeOrder;
         }
 
         if (this.typeOrderUsed.length === 0) {
@@ -678,11 +675,8 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         return undefined;
     }
 
-    protected isImageLoaderAddonModName(modName: string) {
-        return modName === 'ImageLoaderHook'
-            || modName === 'ImageLoaderHookCore'
-            || modName === 'ModLoader DoL ImageLoaderHook'
-            || modName === 'ImageLoaderHook2BeautySelectorAddon';
+    protected ImageLoaderAddonModName(modName: string) {
+        return modName === 'ImageLoaderHook' || modName === 'ImageLoaderHookCore' || modName === 'ModLoader DoL ImageLoaderHook' || modName === 'ImageLoaderHook2BeautySelectorAddon';
     }
 
     async replaceStyleSheets() {
@@ -697,18 +691,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     checkImageExist(src: string) {
         src = this.normalizePath(src);
 
-        if (!this.typeOrderUsed) {
-            if (this.errorCount < 10) {
-                ++this.errorCount;
-                console.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init?');
-                this.logger.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init?');
-                if (this.errorCount === 10) {
-                    console.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init? this error will not show again');
-                    this.logger.error('[BeautySelectorAddon] imageGetter typeOrderUsed not set. maybe not init? this error will not show again');
-                }
-            }
-            return false;
-        }
+        if (!this.typeOrderUsed) this.typeOrderUsed = this.typeOrder;
 
         if (this.typeOrderUsed.length === 0) {
             // ignore
