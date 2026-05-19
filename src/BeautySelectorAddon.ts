@@ -12,7 +12,7 @@ import type {
     ModInfo,
 } from "../../../dist-BeforeSC2/ModLoader";
 import type {ModZipReader} from "../../../dist-BeforeSC2/ModZipReader";
-import {every, isArray, isNil, isString} from 'lodash';
+import {every, isArray, isFunction, isNil, isString} from 'lodash';
 import {extname} from "./extname";
 import JSON5 from 'json5';
 import {
@@ -171,6 +171,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         this.imageStore = new ModImageStore(this.gModUtils, this.logger);
         this.cssReplacer = new CssReplacer(window, gSC2DataManager, gModUtils);
         this.nodeMutationObserver = new NodeMutationObserver(this.imageGetter.bind(this), gModUtils);
+        window.modImgLoaderHooker = this;
 
         const theName = this.gModUtils.getNowRunningModName();
         if (!theName) {
@@ -198,6 +199,17 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
     protected nodeMutationObserver: NodeMutationObserver;
     protected typeOrderSubUi?: TypeOrderSubUi;
     protected imageStoreYieldCount = 0;
+    protected sideHooker: {
+        hookName: string;
+        imageLoader: (
+            src: string,
+            layer: any,
+            successCallback: (src: string, layer: any, img: HTMLImageElement) => void,
+            errorCallback: (src: string, layer: any, event: any) => void,
+        ) => Promise<boolean>;
+        imageGetter: (src: string) => Promise<string | undefined>;
+        checkImageExist?: (src: string) => boolean | undefined;
+    }[] = [];
 
     protected ImageLoaderCompatibilityAddonPlugins() {
         const addonPluginManager = this.gSC2DataManager.getAddonPluginManager();
@@ -215,6 +227,23 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         if ((this.imageStoreYieldCount % 16) === 0) {
             await new Promise(resolve => setTimeout(resolve, 0));
         }
+    }
+
+    public addSideHooker(hooker: BeautySelectorAddon['sideHooker'][number]) {
+        if (isString(hooker?.hookName) && isFunction(hooker.imageLoader) && isFunction(hooker.imageGetter)) {
+            console.log('[BeautySelectorAddon] addSideHooker() ok', [hooker]);
+            this.logger.log(`[BeautySelectorAddon] addSideHooker() ok: hookName[${hooker.hookName}]`);
+            this.sideHooker.push(hooker);
+            return;
+        }
+        console.error('[BeautySelectorAddon] addSideHooker() failed. invalid hook.', [hooker]);
+        this.logger.error(`[BeautySelectorAddon] addSideHooker() failed. invalid hook.`);
+    }
+
+    public removeModFromImgLookupTable(modNameList: string[]) {
+        const modNameListSet = new Set(modNameList);
+        this.typeOrder = this.typeOrder.filter(T => !modNameListSet.has(T.modRef.name));
+        this.typeOrderUsed = this.typeOrderUsed?.filter(T => !modNameListSet.has(T.modRef.name));
     }
 
     protected getImageMimeType(imagePath: string) {
@@ -634,9 +663,17 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                 return false;
             }
         } else {
-            // ignore it
-            // console.warn('[BeautySelectorAddon] cannot find img. ', [src]);
-            // this.logger.warn(`[BeautySelectorAddon] cannot find img. src[${src}]`);
+            for (const hooker of this.sideHooker) {
+                try {
+                    const r = await hooker.imageLoader(src, layer, successCallback, errorCallback);
+                    if (r) {
+                        return true;
+                    }
+                } catch (e: Error | any) {
+                    console.error('[BeautySelectorAddon] imageLoader sideHooker error', [src, hooker, e]);
+                    this.logger.error(`[BeautySelectorAddon] imageLoader sideHooker error: src[${src}] hook[${hooker.hookName}] ${e?.message ? e.message : e}`);
+                }
+            }
             return false;
         }
     }
@@ -672,6 +709,17 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             }
         }
         // ignore ?
+        for (const hooker of this.sideHooker) {
+            try {
+                const r = await hooker.imageGetter(src);
+                if (r) {
+                    return r;
+                }
+            } catch (e: Error | any) {
+                console.error('[BeautySelectorAddon] imageGetter sideHooker error', [src, hooker, e]);
+                this.logger.error(`[BeautySelectorAddon] imageGetter sideHooker error: src[${src}] hook[${hooker.hookName}] ${e?.message ? e.message : e}`);
+            }
+        }
         return undefined;
     }
 
@@ -717,6 +765,25 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             }
         }
         // ignore ?
+        let maybeExist = false;
+        for (const hooker of this.sideHooker) {
+            try {
+                if (hooker.checkImageExist) {
+                    const c = hooker.checkImageExist(src);
+                    if (c === true) {
+                        return true;
+                    } else if (c === undefined) {
+                        maybeExist = true;
+                    }
+                }
+            } catch (e: Error | any) {
+                console.error('[BeautySelectorAddon] checkImageExist sideHooker error', [src, hooker, e]);
+                this.logger.error(`[BeautySelectorAddon] checkImageExist sideHooker error: src[${src}] hook[${hooker.hookName}] ${e?.message ? e.message : e}`);
+            }
+        }
+        if (maybeExist) {
+            return undefined;
+        }
         return false;
     }
 

@@ -10,6 +10,7 @@ declare global {
         jQuery: jQuery;
 
         addonBeautySelectorAddon: BeautySelectorAddon;
+        modImgLoaderHooker: BeautySelectorAddon;
 
         modLoaderGui_ModSubUiAngularJsService: ModSubUiAngularJsService;
     }
