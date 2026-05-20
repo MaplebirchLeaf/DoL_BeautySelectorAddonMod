@@ -84,6 +84,30 @@ export class BeautySelectorAddonImgGetterIndexedDB implements IModImgGetter {
         }
     }
 
+    async getImageObjectUrl() {
+        arguments.length > 0 && console.error('[BeautySelectorAddon] BeautySelectorAddonImgGetterIndexedDB getImageObjectUrl() cannot have arguments.', arguments);
+        if (this.invalid) {
+            return undefined;
+        }
+
+        try {
+            const imageData = await this.imageStore.getImageObjectUrl(this.modName, this.modHashString, this.type, this.imgPath);
+            if (imageData) {
+                return imageData;
+            } else {
+                this.invalid = true;
+                console.error(`[BeautySelectorAddon] BeautySelectorAddonImgGetterIndexedDB getImageObjectUrl() image not found: ${this.imgPath} in ${this.modName}`);
+                this.logger.error(`[BeautySelectorAddon] BeautySelectorAddonImgGetterIndexedDB getImageObjectUrl() image not found: ${this.imgPath} in ${this.modName}`);
+                return undefined;
+            }
+        } catch (error) {
+            this.invalid = true;
+            console.error(`[BeautySelectorAddon] BeautySelectorAddonImgGetterIndexedDB getImageObjectUrl() error: ${this.imgPath} in ${this.modName}`, error);
+            this.logger.error(`[BeautySelectorAddon] BeautySelectorAddonImgGetterIndexedDB getImageObjectUrl() error: ${this.imgPath} in ${this.modName}`);
+            return undefined;
+        }
+    }
+
 }
 
 export function isParamsType0(a: any): a is BeautySelectorAddonParamsType0 {
@@ -170,7 +194,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         this.cachedFileList = new CachedFileList(this.gModUtils, this.logger);
         this.imageStore = new ModImageStore(this.gModUtils, this.logger);
         this.cssReplacer = new CssReplacer(window, gSC2DataManager, gModUtils);
-        this.nodeMutationObserver = new NodeMutationObserver(this.imageGetter.bind(this), gModUtils);
+        this.nodeMutationObserver = new NodeMutationObserver(this.imageSrcGetter.bind(this), gModUtils);
         window.modImgLoaderHooker = this;
 
         const theName = this.gModUtils.getNowRunningModName();
@@ -256,14 +280,19 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         return 'image/png';
     }
 
+    protected withImageMimeType(imagePath: string, imageData: Blob) {
+        const mimeType = this.getImageMimeType(imagePath);
+        if (imageData.type === mimeType) return imageData;
+        return new Blob([imageData], {type: mimeType});
+    }
+
     protected async storeZipImageToIndexDB(
         streaming: Awaited<ReturnType<ModImageStore['initStreamingStorage']>>,
         imagePath: string,
         realPath: string,
         imageFile: JSZipObjectLikeReadOnlyInterface,
     ) {
-        const base64Data = await imageFile.async('base64');
-        const imageData = `data:${this.getImageMimeType(realPath)};base64,${base64Data}`;
+        const imageData = this.withImageMimeType(realPath, await imageFile.async('blob'));
         await streaming.storeImage(imagePath, realPath, imageData);
         await this.waitImageStoreTurn();
     }
@@ -639,7 +668,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         successCallback: (src: string, layer: any, img: HTMLImageElement) => void,
         errorCallback: (src: string, layer: any, event: any) => void,
     ) {
-        const imgString = await this.imageGetter(src);
+        const imgString = await this.imageSrcGetter(src);
         // console.log('[BeautySelectorAddon] imgLoaderHooker', [src, n]);
         if (imgString) {
             try {
@@ -722,6 +751,46 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         return undefined;
     }
 
+    async imageSrcGetter(
+        src: string,
+    ) {
+        src = this.normalizePath(src);
+
+        if (!this.typeOrderUsed) {
+            this.typeOrderUsed = this.typeOrder;
+        }
+
+        if (this.typeOrderUsed.length === 0) {
+            return undefined;
+        }
+
+        for (const type of this.typeOrderUsed) {
+            const n = type.imgListRef?.get(src);
+            if (n) {
+                try {
+                    const getter = n.getter as typeof n.getter & {getImageObjectUrl?: () => Promise<string | undefined>};
+                    if (getter.getImageObjectUrl) return await getter.getImageObjectUrl();
+                    return await n.getter.getBase64Image();
+                } catch (e: Error | any) {
+                    console.error('[BeautySelectorAddon] imageSrcGetter error', [src, type, e]);
+                    this.logger.error(`[BeautySelectorAddon] imageSrcGetter error: src[${src}] type[${type}] e[${e?.message ? e.message : e}]`);
+                    return undefined;
+                }
+            }
+        }
+
+        for (const hooker of this.sideHooker) {
+            try {
+                const r = await hooker.imageGetter(src);
+                if (r) return r;
+            } catch (e: Error | any) {
+                console.error('[BeautySelectorAddon] imageSrcGetter sideHooker error', [src, hooker, e]);
+                this.logger.error(`[BeautySelectorAddon] imageSrcGetter sideHooker error: src[${src}] hook[${hooker.hookName}] ${e?.message ? e.message : e}`);
+            }
+        }
+        return undefined;
+    }
+
     protected ImageLoaderAddonModName(modName: string) {
         return modName === 'ImageLoaderHook' || modName === 'ImageLoaderHookCore' || modName === 'ModLoader DoL ImageLoaderHook' || modName === 'ImageLoaderHook2BeautySelectorAddon';
     }
@@ -792,7 +861,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
             return this.checkImageExist(mlSrc);
         });
         this.gSC2DataManager.getHtmlTagSrcHook().addHook('BeautySelectorAddon', async (el: HTMLImageElement | HTMLElement, mlSrc: string, field: string) => {
-            const img = await this.imageGetter(mlSrc);
+            const img = await this.imageSrcGetter(mlSrc);
             if (img) {
                 el.setAttribute(field, img);
                 return true;
