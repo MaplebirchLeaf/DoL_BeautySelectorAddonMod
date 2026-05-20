@@ -71,11 +71,6 @@ export interface ModImageStoreDbSchema extends DBSchema {
 
 type ImageStoreRecord = ModImageStoreDbSchema['imageStore']['value'];
 
-interface ImageObjectUrlCacheItem {
-    url: string;
-    lastUsed: number;
-}
-
 interface RuntimeDeviceProfile {
     deviceMemory: number;
     hardwareConcurrency: number;
@@ -267,9 +262,6 @@ export class ModImageStore {
     }
 
     protected dbRef?: IDBPDatabase<ModImageStoreDbSchema>;
-    protected objectUrlCache = new Map<string, ImageObjectUrlCacheItem>();
-    protected objectUrlTick = 0;
-
     protected isInit = false;
     protected isClose = false;
 
@@ -343,44 +335,6 @@ export class ModImageStore {
         if (deviceMemory <= 4 || hardwareConcurrency <= 4) return isMobile ? 2 : 4;
         if (deviceMemory >= 8 && hardwareConcurrency >= 8) return isMobile ? 8 : 24;
         return isMobile ? 4 : 12;
-    }
-
-    protected ObjectUrlCacheLimit() {
-        const {deviceMemory, hardwareConcurrency, isMobile} = this.runtimeDeviceProfile();
-        if (deviceMemory <= 2 || hardwareConcurrency <= 2) return 64;
-        if (deviceMemory <= 4 || hardwareConcurrency <= 4) return isMobile ? 96 : 192;
-        if (deviceMemory >= 8 && hardwareConcurrency >= 8) return isMobile ? 256 : 512;
-        return isMobile ? 160 : 320;
-    }
-
-    protected touchObjectUrlCache(imageKey: string, url: string) {
-        this.objectUrlCache.set(imageKey, {
-            url,
-            lastUsed: ++this.objectUrlTick,
-        });
-        this.trimObjectUrlCache();
-    }
-
-    protected trimObjectUrlCache() {
-        const limit = this.ObjectUrlCacheLimit();
-        if (this.objectUrlCache.size <= limit) return;
-        const overflow = this.objectUrlCache.size - limit;
-        const staleItems = Array.from(this.objectUrlCache.entries())
-            .sort((a, b) => a[1].lastUsed - b[1].lastUsed)
-            .slice(0, overflow);
-        for (const [imageKey, item] of staleItems) {
-            URL.revokeObjectURL(item.url);
-            this.objectUrlCache.delete(imageKey);
-        }
-    }
-
-    protected revokeObjectUrlsByPrefix(prefix: string) {
-        for (const [imageKey, item] of Array.from(this.objectUrlCache.entries())) {
-            if (imageKey.startsWith(prefix)) {
-                URL.revokeObjectURL(item.url);
-                this.objectUrlCache.delete(imageKey);
-            }
-        }
     }
 
     /**
@@ -488,28 +442,6 @@ export class ModImageStore {
         return blobToDataUrl(imageRecord.imageData);
     }
 
-    async getImageObjectUrl(modName: string, modHashString: string, type: string, imagePath: string): Promise<string | undefined> {
-        try {
-            await this.iniImageStore();
-        } catch (e) {
-            console.error('[BeautySelectorAddon] getImageObjectUrl error', [e]);
-            throw e;
-        }
-
-        const imageKey = `${modName}_${modHashString}_${type}_${imagePath}`;
-        const cached = this.objectUrlCache.get(imageKey);
-        if (cached) {
-            cached.lastUsed = ++this.objectUrlTick;
-            return cached.url;
-        }
-
-        const imageRecord = await this.dbRef!.get('imageStore', imageKey);
-        if (!imageRecord?.imageData) return undefined;
-        const objectUrl = URL.createObjectURL(imageRecord.imageData);
-        this.touchObjectUrlCache(imageKey, objectUrl);
-        return objectUrl;
-    }
-
     /**
      * Get image paths for a mod type
      */
@@ -548,7 +480,6 @@ export class ModImageStore {
                 const image = cursor.value;
                 if (image.modHashString !== modHashString) {
                     console.log('[BeautySelectorAddon] removeChangedModImages image', [image.imageKey]);
-                    this.revokeObjectUrlsByPrefix(`${image.modName}_${image.modHashString}_${image.type}_${image.imagePath}`);
                     await cursor.delete();
                 }
             }
@@ -585,7 +516,6 @@ export class ModImageStore {
                 const image = cursor.value;
                 if (!modNameSet.has(image.modName)) {
                     // console.log('[BeautySelectorAddon] removeNotExistModImages image', [image.imageKey]);
-                    this.revokeObjectUrlsByPrefix(`${image.modName}_${image.modHashString}_${image.type}_${image.imagePath}`);
                     await cursor.delete();
                 }
             }
@@ -604,8 +534,6 @@ export class ModImageStore {
     }
 
     close() {
-        for (const item of this.objectUrlCache.values()) URL.revokeObjectURL(item.url);
-        this.objectUrlCache.clear();
         // this.dbRef?.close();
         // this.isInit = false;
         // this.isClose = true;
