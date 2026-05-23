@@ -355,10 +355,38 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
                 return;
             }
 
+            const oImg = mod.imgs;
+            const imgList = new Map<string, ModImgEx>(
+                oImg.map(T => {
+                    return [T.path, {
+                        path: T.path,
+                        realPath: T.path,
+                        getter: T.getter,
+                    }];
+                }),
+            );
+            // clean it
+            mod.imgs = [];
+
+            const BS = {
+                name: modName,
+                mod: mod,
+                modZip: modZip,
+                type: [typeName],
+                params: ad.params,
+                typeImg: new Map<string, Map<string, ModImgEx>>([[typeName, imgList]]),
+            };
+            this.table.set(typeName, BS);
+            this.typeOrder.push({
+                type: typeName,
+                modRef: BS,
+                imgListRef: imgList,
+            });
+
             this.type0ModNameList.push(modName);
 
-            console.log(`[BeautySelectorAddon] converted Type0 Mod ignored in type order.`, [addonName, mod.name, mod, modZip, typeName]);
-            this.logger.log(`[BeautySelectorAddon] converted Type0 Mod ignored in type order. [${mod.name}]`);
+            console.log(`[BeautySelectorAddon] converted Mod ok.`, [addonName, mod.name, mod, modZip, typeName]);
+            this.logger.log(`[BeautySelectorAddon] converted Mod ok. [${mod.name}]`);
         } else if (isParamsType1(ad.params)) {
             const params: BeautySelectorAddonParamsType1 = ad.params;
             const type = params.type;
@@ -871,10 +899,13 @@ export class TypeOrderSubUi {
 
     async whenCreate(Ref: ModSubUiAngularJsModeExportInterface) {
 
-        const typeAllList = this.beautySelectorAddon.getTypeOrder();
+        const rawTypeAllList = this.beautySelectorAddon.getTypeOrder();
+        const type0ModNameSet = new Set(this.beautySelectorAddon.type0ModNameList);
+        const type0AlwaysEnabledList = rawTypeAllList.filter(T => type0ModNameSet.has(T.modRef.name));
+        const typeAllList = rawTypeAllList.filter(T => !type0ModNameSet.has(T.modRef.name));
         const typeAllSet = new Map<string, TypeOrderItem>(typeAllList.map(T => [T.type, T]));
-        const typeEnabledList = this.beautySelectorAddon.typeOrderUsed || [];
-        const typeDisabledList = typeAllList.filter(T => !typeEnabledList?.find(T2 => T2.type === T.type));
+        const typeEnabledList = (this.beautySelectorAddon.typeOrderUsed || []).filter(T => !type0ModNameSet.has(T.modRef.name));
+        const typeDisabledList = typeAllList.filter(T => !typeEnabledList.find(T2 => T2.type === T.type));
         Ref.addComponentModGuiConfig({
             selector: 'enable-order-component',
             data: {
@@ -908,9 +939,8 @@ export class TypeOrderSubUi {
                     _selectedKeyDisabled: string | number,
                 ) => {
                     try {
-                        // console.log('onChange', [action, listEnabled, listDisabled, selectedKeyEnabled, selectedKeyDisabled]);
-                        this.beautySelectorAddon.typeOrderUsed = listEnabled.map(T => typeAllSet.get(T.key as string)).filter((T): T is TypeOrderItem => !!T);
-                        // const enabledSet = new Set(this.beautySelectorAddon.typeOrderUsed.map(T => T.type));
+                        const normalTypeOrderUsed = listEnabled.map(T => typeAllSet.get(T.key as string)).filter((T): T is TypeOrderItem => !!T);
+                        this.beautySelectorAddon.typeOrderUsed = [ ...type0AlwaysEnabledList, ...normalTypeOrderUsed];
                         await this.beautySelectorAddon.saveOrder(this.beautySelectorAddon.typeOrderUsed.map(T => T.type));
                     } catch (e) {
                         console.error('[BeautySelectorAddon] onChange error', [e]);
