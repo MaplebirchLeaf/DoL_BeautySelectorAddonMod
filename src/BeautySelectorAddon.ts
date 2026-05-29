@@ -170,7 +170,7 @@ export class BeautySelectorAddon implements AddonPluginHookPointEx, BeautySelect
         this.cachedFileList = new CachedFileList(this.gModUtils, this.logger);
         this.imageStore = new ModImageStore(this.gModUtils, this.logger);
         this.cssReplacer = new CssReplacer(window, gSC2DataManager, gModUtils);
-        this.nodeMutationObserver = new NodeMutationObserver(this.imageGetter.bind(this), gModUtils);
+        this.nodeMutationObserver = new NodeMutationObserver(this.imageGetter.bind(this), gModUtils, this.checkImageExist.bind(this));
         window.modImgLoaderHooker = this;
 
         const theName = this.gModUtils.getNowRunningModName();
